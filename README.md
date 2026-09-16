@@ -16,6 +16,15 @@ project report. It is read as evidence — the tree **and** the commit history.
    cd lab-env && vagrant up
    ```
 
+   **Before your group repository exists**, clone the public starter instead and attach the
+   group remote later — nothing is lost:
+
+   ```bash
+   git clone https://github.com/fced2627/lab-starter.git fced && cd fced
+   # once gNN exists:
+   git remote set-url origin git@github.com:fced2627/gNN.git && git push -u origin main
+   ```
+
 2. Build the repository skeleton together, as described in §3 of the starter guide
    (`ansible/`, `images/`, `containers/`, `monitoring/`, `docs/`) and agree out loud on
    branch strategy, review and commit conventions.
