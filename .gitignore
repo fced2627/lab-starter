@@ -1,0 +1,15 @@
+# Vagrant / libvirt state
+.vagrant/
+*.box
+
+# Ansible
+*.retry
+.facts/
+.vault-pass
+
+# Containers
+*.sif
+
+# Editors and OS noise
+.DS_Store
+*.swp

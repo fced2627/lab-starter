@@ -1,0 +1,92 @@
+# -*- mode: ruby -*-
+# FCED 2026/2027 — teaching cluster on your own laptop.
+#
+#   vagrant up                 bring up mgmt + store (+ nodes, while they are still boxes)
+#   vagrant ssh mgmt           get a shell on the management node
+#   vagrant halt / destroy     stop / delete
+#
+# Two networks per machine:
+#   eth0  NAT, created by Vagrant. Host-to-VM SSH and outbound internet only.
+#   eth1  the cluster network 10.10.7.0/24, with the hypervisor's DHCP DISABLED
+#         so that Warewulf's dhcpd can own it from Module 04 onwards.
+#
+# From Module 04, node01 and node02 stop being Vagrant boxes: you destroy them
+# here and recreate them as diskless PXE machines with lab-env/nodes-pxe.sh.
+# Until then they are ordinary boxes so that Modules 01-03 work immediately.
+
+GROUP   = ENV.fetch("FCED_GROUP", "07").rjust(2, "0")
+SUBNET  = "10.10.#{GROUP.to_i}"
+BOX     = ENV.fetch("FCED_BOX", "rockylinux/9")
+PROFILE = ENV.fetch("FCED_PROFILE", "full")      # full = 4 VMs, small = 3 VMs
+
+# memory (MB) / vCPU.  full: 8 GB and 7 vCPU in total — sized for a 16 GB laptop.
+SPEC = {
+  "mgmt"   => { mem: 3072, cpus: 2, ip: "#{SUBNET}.1"   },
+  "store"  => { mem: 1024, cpus: 1, ip: "#{SUBNET}.20"  },
+  "node01" => { mem: 2048, cpus: 2, ip: "#{SUBNET}.101" },
+  "node02" => { mem: 2048, cpus: 2, ip: "#{SUBNET}.102" },
+}
+MACHINES = PROFILE == "small" ? %w[mgmt store node01] : %w[mgmt store node01 node02]
+
+Vagrant.configure("2") do |config|
+  config.vm.box = BOX
+  config.vm.box_check_update = false
+  # Keep Vagrant's own key working: Module 02 hardens sshd, and locking yourself
+  # out of your own laptop VMs is a bad way to spend an afternoon.
+  config.ssh.insert_key = true
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  MACHINES.each do |name|
+    spec = SPEC.fetch(name)
+
+    config.vm.define name do |m|
+      m.vm.hostname = "#{name}.g#{GROUP}.hpc.local"
+
+      # --- the cluster network -------------------------------------------------
+      m.vm.network "private_network",
+        ip: spec[:ip],
+        netmask: "255.255.255.0",
+        # libvirt: an isolated network with no dnsmasq DHCP
+        libvirt__network_name: "fced-g#{GROUP}",
+        libvirt__dhcp_enabled: false,
+        libvirt__forward_mode: "none",
+        # VirtualBox: an internal network, which has no built-in DHCP either
+        virtualbox__intnet: "fced-g#{GROUP}"
+
+      # store gets the data disk that becomes /scratch
+      if name == "store"
+        m.vm.disk :disk, size: "40GB", name: "data"
+      end
+
+      m.vm.provider :libvirt do |v|
+        v.memory = spec[:mem]
+        v.cpus   = spec[:cpus]
+        v.cpu_mode = "host-passthrough"       # so lscpu shows real CPU flags
+        v.machine_virtual_size = 30
+      end
+
+      m.vm.provider :virtualbox do |v|
+        v.memory = spec[:mem]
+        v.cpus   = spec[:cpus]
+        v.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
+        v.customize ["modifyvm", :id, "--paravirtprovider", "kvm"]
+      end
+
+      # Apple Silicon: vagrant-qemu, with an aarch64 box (set FCED_BOX)
+      m.vm.provider :qemu do |v|
+        v.memory = "#{spec[:mem]}M"
+        v.smp    = spec[:cpus]
+      end
+
+      # Minimal bootstrap only. Everything else is your Ansible, from Module 05.
+      m.vm.provision "shell", inline: <<-SHELL
+        set -e
+        cat >> /etc/hosts <<'HOSTS'
+#{SPEC.map { |n, s| "#{s[:ip]}  #{n}.g#{GROUP}.hpc.local #{n}" }.join("\n")}
+HOSTS
+        command -v python3 >/dev/null || dnf -y install python3
+        systemctl disable --now firewalld 2>/dev/null || true
+      SHELL
+    end
+  end
+end
