@@ -13,3 +13,6 @@
 # Editors and OS noise
 .DS_Store
 *.swp
+
+
+.claude
