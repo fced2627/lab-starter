@@ -74,13 +74,28 @@ What is different from VirtualBox, and why:
 - `vagrant up` prints *"You have configured private_network but advanced_network is not enabled"*:
   expected. The cluster NIC is added by the Vagrantfile itself and configured by a provisioner, with
   the same addresses as every other provider.
-- **Fixed SSH ports** 50022–50025 (mgmt, store, node01, node02). `vagrant ssh` and `vagrant ssh-config`
+- **Fixed SSH ports** 20022–20025 (mgmt, store, node01, node02), deliberately below the ephemeral
+  range (macOS lends ports from 49152 up to outgoing connections, and a forward there fails at random).
+  `vagrant ssh` and `vagrant ssh-config`
   work as usual.
 - There is no official Rocky 9 box for this provider (the `rockylinux/9` libvirt/arm64 download is
   gone), hence `make-box.sh`, which repackages Bento's image without changing it.
 - `systemctl --failed` shows **`vboxadd.service` and `vboxadd-service.service`**: the image carries
   VirtualBox's guest additions, and there is no VirtualBox. That is a real failure to explain in
   Module 01, Task 4 — and to fix in your image later.
+
+> **Tailscale, or any VPN that changes your laptop's DNS.** QEMU's NAT answers DNS at `10.0.2.3` by
+> forwarding to the laptop's resolvers. With Tailscale on, those become `100.100.100.100` (MagicDNS),
+> which QEMU's forwarder gets no answer from: inside the VMs every name fails (`dnf` reports *Could not
+> resolve host*), although the internet is reachable by IP. Either turn the VPN off while you work,
+> or give the NAT interface of each VM a public resolver — it persists across reboots:
+>
+> ```bash
+> sudo nmcli con mod enp0s8 ipv4.dns "1.1.1.1 9.9.9.9" ipv4.ignore-auto-dns yes
+> sudo nmcli con up enp0s8
+> ```
+>
+> The cluster network is not affected: names there come from `/etc/hosts`.
 
 Set the box explicitly only if the default does not suit you:
 
@@ -118,6 +133,10 @@ through it. Your laptop reaches each one on its own forwarded port (`vagrant ssh
 The second is the cluster network, and **the hypervisor's DHCP
 server is deliberately switched off on it**, because from Module 04 Warewulf's `dhcpd` owns that
 network. Two DHCP servers on one segment is the most common way to lose an afternoon here.
+
+On first boot the provisioner also gives every VM **its own SSH host keys**. The box ships a single
+set, generated when it was built, so without this every VM made from it — in every group, on every
+laptop — would share one private host key. (Module 02 asks you to check this.)
 
 Their **names depend on the provider** (`enp0s8`/`enp0s9` on VirtualBox/ARM, `eth0`/`eth1` or
 `ens*` elsewhere). Do not hard-code them; find the cluster interface by its address:
@@ -203,13 +222,22 @@ adjusted rather than discovered at the defence.
 | VM enters *Guru Meditation* right after "Booting VM" (Apple Silicon) | Nested virtualisation is on. The Vagrantfile turns it off on ARM hosts; check you have not re-added it. |
 | `VERR_PDM_USB_NAME_CLASH` for every VM | The VirtualBox Extension Pack is a different version from VirtualBox. Install the matching pack, or remove it. |
 | `ip addr show eth1`: *Device does not exist* | Interface names depend on the provider — see §3. |
+| `dnf`: *Could not resolve host*, but `curl https://1.1.1.1` works (QEMU) | The laptop's DNS changed under you — typically Tailscale or another VPN. See the note in §2.1. |
+| QEMU: `vagrant up` times out on SSH; the VM's process sits at 100 % CPU with only a few MB resident | The firmware hung before the guest started (seen once, with several VMs booting at once). `vagrant destroy -f <vm> && vagrant up <vm>`. |
+| QEMU: *Could not set up host forwarding rule* | The SSH port is taken. With the default ports (20022–20025) that means another QEMU cluster is running; stop it, or give this one other ports. |
 | Everything is extremely slow | RAM is oversubscribed and the host is swapping. Close things, or use the reduced profile. |
-| `vagrant ssh` stops working after Module 02 | Your SSH hardening removed the `vagrant` user or its key. Recover through the hypervisor console. |
+| `vagrant ssh` stops working after Module 02 | Your SSH hardening removed the `vagrant` user or its key, or `AllowGroups` does not list `vagrant`. Recover through the hypervisor console. |
 | Node boots but has no `/apps` | `store` is not up, or its export is not configured yet. |
 
 **Before hardening anything, know how to get back in.** `./nodes-pxe.sh console` and
 `virsh console mgmt` (or the VirtualBox GUI) are your route into a machine whose network
-configuration you have just broken. You will need it at least once.
+configuration you have just broken. With QEMU, each Vagrant VM's serial console is a socket:
+
+```bash
+nc -U ~/.vagrant.d/tmp/vagrant-qemu/$(cat .vagrant/machines/mgmt/qemu/id)/qemu_socket_serial
+```
+
+You will need it at least once.
 
 ---
 

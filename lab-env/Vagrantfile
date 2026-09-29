@@ -44,8 +44,11 @@ MACHINES = PROFILE == "small" ? %w[mgmt store node01] : %w[mgmt store node01 nod
 
 # QEMU provider only: the VDE switch that is the cluster network, a fixed SSH port
 # per machine, and a fixed MAC on the cluster NIC (52:54:00:fc:GG:<last octet>).
+# The ports sit below the ephemeral range (macOS 49152+, Linux 32768+): up there the
+# OS may already have lent the port to an outgoing connection, and `vagrant up`
+# fails at random with "Could not set up host forwarding rule".
 VDE_SOCK  = "/tmp/fced-g#{GROUP}.vde"
-QEMU_PORT = { "mgmt" => 50022, "store" => 50023, "node01" => 50024, "node02" => 50025 }
+QEMU_PORT = { "mgmt" => 20022, "store" => 20023, "node01" => 20024, "node02" => 20025 }
 def qemu_mac(ip) = format("52:54:00:fc:%02x:%02x", GROUP.to_i, ip.split(".").last.to_i)
 
 def vde_switch_up
@@ -141,6 +144,15 @@ Vagrant.configure("2") do |config|
 HOSTS
         command -v python3 >/dev/null || dnf -y install python3
         systemctl disable --now firewalld 2>/dev/null || true
+        # The box ships ONE set of SSH host keys, baked in when it was built: every
+        # VM made from it, on every laptop, would share the same private host key.
+        # Give this machine its own, once.
+        if [ ! -e /etc/ssh/.fced-host-keys ]; then
+          rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+          ssh-keygen -A >/dev/null
+          systemctl restart sshd
+          touch /etc/ssh/.fced-host-keys
+        fi
       SHELL
     end
   end
