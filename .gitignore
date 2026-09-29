@@ -16,3 +16,6 @@
 
 
 .claude
+
+# QEMU PXE nodes (firmware copies, per-node state)
+.qemu-nodes/

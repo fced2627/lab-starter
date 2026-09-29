@@ -32,7 +32,8 @@ Vagrant drives whichever hypervisor you have. Pick the row that matches your mac
 | **Windows x86_64** | `virtualbox` | VirtualBox 7.x + Vagrant | Works. Disable Hyper-V, or VirtualBox falls back to a slow execution mode. |
 | **Windows (alt.)** | `libvirt` inside WSL2 | Enable `nestedVirtualization=true` in `.wslconfig` | Closer to the reference path; more moving parts. |
 | **macOS, Intel** | `virtualbox` | VirtualBox 7.x + Vagrant | Works. |
-| **macOS, Apple Silicon** | `virtualbox` | VirtualBox **≥ 7.1** + Vagrant; the Extension Pack, if installed, must be the **same version** | Tested end to end for Module 01 (Rocky 9 aarch64, M-series, 29/09/2026). **No PXE** — see §4. |
+| **macOS, Apple Silicon** | `qemu` | `brew install qemu` + `vagrant plugin install vagrant-qemu`, then once `./qemu/make-box.sh` | **Recommended.** The only Apple Silicon path that PXE-boots diskless nodes (Module 04). Tested 29/09/2026: 4 VMs, cluster network, Module 01 deliverable, PXE nodes. See §2.1. |
+| **macOS, Apple Silicon (alt.)** | `virtualbox` | VirtualBox **≥ 7.1** + Vagrant; the Extension Pack, if installed, must be the **same version** | Works for Modules 01–03 (Module 01 tested end to end). **No PXE**, so you would have to switch to `qemu` for Module 04. |
 
 The Vagrantfile detects an ARM host and adjusts itself; you do not need to set anything. What it
 changes, and what that means for the labs:
@@ -40,11 +41,11 @@ changes, and what that means for the labs:
 | | x86_64 host | ARM host (Apple Silicon) |
 |---|---|---|
 | Guest architecture | x86_64 | **aarch64** — the same ISA as Deucalion's A64FX nodes |
-| Default box | `rockylinux/9` | `bento/rockylinux-9` (the official arm64 box is broken on VirtualBox) |
+| Default box | `rockylinux/9` | QEMU: `fced/rockylinux-9-qemu` (built by `qemu/make-box.sh`); VirtualBox: `bento/rockylinux-9` (the official arm64 box is broken there) |
 | Nested virtualisation | on | **off** (it crashes the VM on Apple Silicon) |
-| Interface names | depend on box and provider (`eth0`/`eth1`, `enp0s3`/`enp0s8`, …) | `enp0s8` / `enp0s9` (VirtualBox, tested) |
+| Interface names | depend on box and provider (`eth0`/`eth1`, `enp0s3`/`enp0s8`, …) | `enp0s8` / `enp0s9` (QEMU and VirtualBox, tested) |
 | CPU flags to look for (Module 01, 03) | `avx2`, `avx512*`, `fma` | `asimd` (NEON), `sve`, `sve2` — see the warning below |
-| PXE, diskless nodes (Module 04) | works | **not with VirtualBox** — see §4 |
+| PXE, diskless nodes (Module 04) | works | **QEMU provider only** (§2.1, §4) |
 | Everything else (Ansible, SLURM, EESSI, Apptainer, monitoring) | works | expected to work: EESSI, OpenHPC and Apptainer publish aarch64 builds; confirm as you reach each module |
 
 > **Apple Silicon: SVE is advertised but not there.** `lscpu` inside the VM lists `sve2`, but an
@@ -54,6 +55,32 @@ changes, and what that means for the labs:
 
 The one thing that is identical on every host is the one that matters most: the **cluster
 network** `10.10.G.0/24`, with no DHCP from the hypervisor.
+
+### 2.1 Apple Silicon with the QEMU provider
+
+```bash
+brew install qemu                       # also installs vde_switch
+vagrant plugin install vagrant-qemu
+cd lab-env && ./qemu/make-box.sh        # once: builds fced/rockylinux-9-qemu from Bento's arm64 box
+export FCED_GROUP=07
+vagrant up --provider qemu              # or: export VAGRANT_DEFAULT_PROVIDER=qemu
+```
+
+What is different from VirtualBox, and why:
+
+- **The cluster network is a VDE switch** (`/tmp/fced-gNN.vde`), a user-space Ethernet switch that
+  ships with Homebrew's QEMU. The Vagrantfile starts it; it needs no root. QEMU's own multicast
+  networking does not deliver frames on macOS, and `vmnet` needs root.
+- `vagrant up` prints *"You have configured private_network but advanced_network is not enabled"*:
+  expected. The cluster NIC is added by the Vagrantfile itself and configured by a provisioner, with
+  the same addresses as every other provider.
+- **Fixed SSH ports** 50022–50025 (mgmt, store, node01, node02). `vagrant ssh` and `vagrant ssh-config`
+  work as usual.
+- There is no official Rocky 9 box for this provider (the `rockylinux/9` libvirt/arm64 download is
+  gone), hence `make-box.sh`, which repackages Bento's image without changing it.
+- `systemctl --failed` shows **`vboxadd.service` and `vboxadd-service.service`**: the image carries
+  VirtualBox's guest additions, and there is no VirtualBox. That is a real failure to explain in
+  Module 01, Task 4 — and to fix in your image later.
 
 Set the box explicitly only if the default does not suit you:
 
@@ -116,13 +143,16 @@ vagrant destroy node01 node02          # they stop being boxes
 
 `mgmt` and `store` stay under Vagrant, because they legitimately hold state.
 
-> **ARM hosts (Apple Silicon): no network boot in VirtualBox.** VirtualBox's ARM UEFI firmware has
-> no PXE: a network-only VM stops at *"No bootable option or device was found"*, and chaining an
-> arm64 iPXE from a small disk did not work either (tested 29/09/2026). `nodes-pxe.sh` refuses to
-> create the nodes on an ARM host for that reason. Until a tested path is published here, groups
-> with Apple Silicon run Module 04 on a teammate's x86 laptop or a lab machine, and keep `mgmt`
-> and `store` on their own. **Tell the teaching staff in week 1** if nobody in your group has an
-> x86 machine.
+> **ARM hosts (Apple Silicon): use the QEMU provider for this.** VirtualBox's ARM firmware has no
+> network boot at all (*"No bootable option or device was found"*), so `nodes-pxe.sh` refuses it.
+> With QEMU (§2.1) the same commands work: each node is a QEMU process on the cluster's VDE switch,
+> with a fixed MAC and no disk. Homebrew's UEFI firmware has no network stack either, so the node
+> starts **iPXE from a tiny read-only drive** that holds nothing else; iPXE then does DHCP, TFTP and
+> HTTP exactly as a network card's boot ROM would. Tested 29/09/2026 with `dnsmasq` on `mgmt` handing
+> out fixed addresses and an iPXE script (both nodes, plus `reset`/`stop`/`destroy`); **not yet with
+> Warewulf itself**, whose `dhcpd` answers iPXE clients with its iPXE script in the same way. (Debian's `qemu-efi-aarch64` firmware does PXE natively, but hangs
+> under Apple's hypervisor — tested with 2025.02 and 2026.08.) The console is `./nodes-pxe.sh
+> console node01` (leave with Ctrl-C); `reset` and `stop` go through the QEMU monitor.
 
 ### There is no BMC on a laptop
 

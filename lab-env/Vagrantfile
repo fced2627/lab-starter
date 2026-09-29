@@ -14,6 +14,13 @@
 # Host architecture matters (see README §2): on an ARM host (Apple Silicon) the
 # guests are aarch64, nested virtualisation is off, and the default box changes.
 #
+# Apple Silicon has two providers. VirtualBox (the default) is enough for Modules
+# 01-03. The QEMU provider is the one that can PXE-boot diskless nodes (Module 04):
+#   vagrant plugin install vagrant-qemu && ./qemu/make-box.sh   # once
+#   vagrant up --provider qemu
+# Its cluster network is a VDE switch (vde_switch, shipped with Homebrew's QEMU)
+# at /tmp/fced-gNN.vde, started by this file; no root is needed.
+#
 # From Module 04, node01 and node02 stop being Vagrant boxes: you destroy them
 # here and recreate them as diskless PXE machines with lab-env/nodes-pxe.sh.
 # Until then they are ordinary boxes so that Modules 01-03 work immediately.
@@ -35,6 +42,20 @@ SPEC = {
 }
 MACHINES = PROFILE == "small" ? %w[mgmt store node01] : %w[mgmt store node01 node02]
 
+# QEMU provider only: the VDE switch that is the cluster network, a fixed SSH port
+# per machine, and a fixed MAC on the cluster NIC (52:54:00:fc:GG:<last octet>).
+VDE_SOCK  = "/tmp/fced-g#{GROUP}.vde"
+QEMU_PORT = { "mgmt" => 50022, "store" => 50023, "node01" => 50024, "node02" => 50025 }
+def qemu_mac(ip) = format("52:54:00:fc:%02x:%02x", GROUP.to_i, ip.split(".").last.to_i)
+
+def vde_switch_up
+  pidfile = "#{VDE_SOCK}.pid"
+  pid = File.read(pidfile).to_i rescue 0
+  return if pid > 0 && (Process.kill(0, pid) rescue false)
+  system("vde_switch", "-s", VDE_SOCK, "-d", "-p", pidfile) or
+    abort "could not start vde_switch (brew install qemu provides it)"
+end
+
 Vagrant.configure("2") do |config|
   config.vm.box = BOX
   config.vm.box_check_update = false
@@ -42,6 +63,10 @@ Vagrant.configure("2") do |config|
   # out of your own laptop VMs is a bad way to spend an afternoon.
   config.ssh.insert_key = true
   config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.trigger.before :up do |t|
+    t.ruby { |_env, machine| vde_switch_up if machine.provider_name == :qemu }
+  end
 
   MACHINES.each do |name|
     spec = SPEC.fetch(name)
@@ -81,11 +106,31 @@ Vagrant.configure("2") do |config|
         v.customize ["modifyvm", :id, "--paravirtprovider", "kvm"]
       end
 
-      # Alternative on Apple Silicon (not the tested path): vagrant-qemu with an
-      # aarch64 box. It supports neither private_network nor vm.disk as written here.
-      m.vm.provider :qemu do |v|
-        v.memory = "#{spec[:mem]}M"
-        v.smp    = spec[:cpus]
+      # Apple Silicon, whole cluster in QEMU (see the header). vagrant-qemu ignores
+      # private_network, so the cluster NIC is added here and configured below.
+      m.vm.provider :qemu do |v, override|
+        override.vm.box = ENV.fetch("FCED_BOX", "fced/rockylinux-9-qemu")
+        v.memory   = "#{spec[:mem]}M"
+        v.smp      = spec[:cpus]
+        v.ssh_port = QEMU_PORT.fetch(name)
+        # NAT NIC in PCI slot 8 and cluster NIC in slot 9: the guest names them
+        # enp0s8/enp0s9, as on VirtualBox, and the image's network profile matches.
+        v.net_device = "virtio-net-pci,addr=0x8"
+        # Disks on virtio-scsi: the image's initramfs was built for it.
+        v.drive_interface = "none"
+        args = ["-device", "virtio-scsi-pci,id=scsi0,addr=0x5",
+                "-device", "scsi-hd,bus=scsi0.0,drive=disk0,bootindex=0"]
+        args += ["-device", "scsi-hd,bus=scsi0.0,drive=disk1"] if name == "store"
+        args += ["-netdev", "vde,id=cluster,sock=#{VDE_SOCK}",
+                 "-device", "virtio-net-pci,netdev=cluster,mac=#{qemu_mac(spec[:ip])},addr=0x9"]
+        v.extra_qemu_args = args
+        override.vm.provision "cluster-network", type: "shell", inline: <<-SHELL
+          set -e
+          nmcli -t -f NAME con show | grep -qx fced-cluster ||
+            nmcli con add type ethernet ifname enp0s9 con-name fced-cluster \
+              ipv4.method manual ipv4.addresses #{spec[:ip]}/24 ipv6.method ignore
+          nmcli con up fced-cluster >/dev/null
+        SHELL
       end
 
       # Minimal bootstrap only. Everything else is your Ansible, from Module 05.
