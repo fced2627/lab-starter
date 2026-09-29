@@ -112,7 +112,10 @@ vagrant ssh mgmt
 | `node02` | 2 GB | 2 | `10.10.G.102` | Compute |
 
 Each machine has two interfaces. The first is Vagrant's NAT interface — it is how your laptop reaches
-the VM and how the VM reaches the internet. The second is the cluster network, and **the hypervisor's DHCP
+the VM and how the VM reaches the internet. **Every VM has its own private NAT**, a small router inside
+the hypervisor: all four get the same `10.0.2.15` on it (gateway `10.0.2.2`), and none can reach another
+through it. Your laptop reaches each one on its own forwarded port (`vagrant ssh-config` shows which).
+The second is the cluster network, and **the hypervisor's DHCP
 server is deliberately switched off on it**, because from Module 04 Warewulf's `dhcpd` owns that
 network. Two DHCP servers on one segment is the most common way to lose an afternoon here.
 
