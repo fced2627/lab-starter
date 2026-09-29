@@ -22,30 +22,44 @@ fine; RAM oversubscription is not.
 
 ---
 
-## 2. Provider matrix
+## 2. Provider matrix — and what changes between x86 and ARM
 
 Vagrant drives whichever hypervisor you have. Pick the row that matches your machine.
 
 | Host | Provider | Install | Notes |
 |---|---|---|---|
-| **Linux** | `libvirt` | `vagrant plugin install vagrant-libvirt` + `libvirt`, `qemu-kvm`, `virt-install` | The reference path. Fastest, and the only one where PXE, VirtualBMC and a serial console all behave exactly as on real hardware. |
-| **Windows** | `virtualbox` | VirtualBox 7.x + Vagrant | Works. Disable Hyper-V, or VirtualBox falls back to a slow execution mode. |
+| **Linux x86_64** | `libvirt` | `vagrant plugin install vagrant-libvirt` + `libvirt`, `qemu-kvm`, `virt-install` | The reference path. Fastest, and the only one where PXE, VirtualBMC and a serial console all behave exactly as on real hardware. |
+| **Windows x86_64** | `virtualbox` | VirtualBox 7.x + Vagrant | Works. Disable Hyper-V, or VirtualBox falls back to a slow execution mode. |
 | **Windows (alt.)** | `libvirt` inside WSL2 | Enable `nestedVirtualization=true` in `.wslconfig` | Closer to the reference path; more moving parts. |
 | **macOS, Intel** | `virtualbox` | VirtualBox 7.x + Vagrant | Works. |
-| **macOS, Apple Silicon** | `qemu` | `vagrant plugin install vagrant-qemu`, plus an **aarch64** box | See the warning below. |
+| **macOS, Apple Silicon** | `virtualbox` | VirtualBox **≥ 7.1** + Vagrant; the Extension Pack, if installed, must be the **same version** | Tested end to end for Module 01 (Rocky 9 aarch64, M-series, 29/09/2026). **No PXE** — see §4. |
 
-> **Apple Silicon — read this before the first lab.** VirtualBox does not run on ARM Macs. The
-> `vagrant-qemu` provider does, but you need an aarch64 box for your distribution, and the whole
-> stack (OpenHPC, Warewulf, EasyBuild, EESSI) must then be the aarch64 build of itself. EESSI and
-> OpenHPC both publish aarch64, so this is expected to work — but **verify it in week 1**, not in
-> week 11. If it does not, tell the teaching staff early: the fallbacks are UTM with a manually
-> created Linux VM, a lab-room machine, or a small cloud instance.
+The Vagrantfile detects an ARM host and adjusts itself; you do not need to set anything. What it
+changes, and what that means for the labs:
 
-Set your box explicitly if the default is not right for your architecture:
+| | x86_64 host | ARM host (Apple Silicon) |
+|---|---|---|
+| Guest architecture | x86_64 | **aarch64** — the same ISA as Deucalion's A64FX nodes |
+| Default box | `rockylinux/9` | `bento/rockylinux-9` (the official arm64 box is broken on VirtualBox) |
+| Nested virtualisation | on | **off** (it crashes the VM on Apple Silicon) |
+| Interface names | depend on box and provider (`eth0`/`eth1`, `enp0s3`/`enp0s8`, …) | `enp0s8` / `enp0s9` (VirtualBox, tested) |
+| CPU flags to look for (Module 01, 03) | `avx2`, `avx512*`, `fma` | `asimd` (NEON), `sve`, `sve2` — see the warning below |
+| PXE, diskless nodes (Module 04) | works | **not with VirtualBox** — see §4 |
+| Everything else (Ansible, SLURM, EESSI, Apptainer, monitoring) | works | expected to work: EESSI, OpenHPC and Apptainer publish aarch64 builds; confirm as you reach each module |
+
+> **Apple Silicon: SVE is advertised but not there.** `lscpu` inside the VM lists `sve2`, but an
+> SVE instruction dies with *Illegal instruction*: Apple's cores execute SVE only in a special
+> streaming mode the guest cannot use. Do not build with `-march=...+sve` for your VMs. On
+> Deucalion's A64FX, SVE is real (512-bit), which is exactly the contrast Module 03 measures.
+
+The one thing that is identical on every host is the one that matters most: the **cluster
+network** `10.10.G.0/24`, with no DHCP from the hypervisor.
+
+Set the box explicitly only if the default does not suit you:
 
 ```bash
 export FCED_BOX=rockylinux/9          # x86_64 default
-export FCED_BOX=<an aarch64 box>      # Apple Silicon
+export FCED_BOX=bento/rockylinux-9    # ARM default; also has an x86_64 VirtualBox build (no libvirt)
 ```
 
 ---
@@ -70,10 +84,17 @@ vagrant ssh mgmt
 | `node01` | 2 GB | 2 | `10.10.G.101` | Compute |
 | `node02` | 2 GB | 2 | `10.10.G.102` | Compute |
 
-Each machine has two interfaces. `eth0` is Vagrant's NAT interface — it is how your laptop reaches
-the VM and how the VM reaches the internet. `eth1` is the cluster network, and **the hypervisor's DHCP
+Each machine has two interfaces. The first is Vagrant's NAT interface — it is how your laptop reaches
+the VM and how the VM reaches the internet. The second is the cluster network, and **the hypervisor's DHCP
 server is deliberately switched off on it**, because from Module 04 Warewulf's `dhcpd` owns that
 network. Two DHCP servers on one segment is the most common way to lose an afternoon here.
+
+Their **names depend on the provider** (`enp0s8`/`enp0s9` on VirtualBox/ARM, `eth0`/`eth1` or
+`ens*` elsewhere). Do not hard-code them; find the cluster interface by its address:
+
+```bash
+CIF=$(ip -o -4 addr show to 10.10.$FCED_GROUP.0/24 | awk '{print $2}')   # e.g. enp0s9
+```
 
 ---
 
@@ -94,6 +115,14 @@ vagrant destroy node01 node02          # they stop being boxes
 ```
 
 `mgmt` and `store` stay under Vagrant, because they legitimately hold state.
+
+> **ARM hosts (Apple Silicon): no network boot in VirtualBox.** VirtualBox's ARM UEFI firmware has
+> no PXE: a network-only VM stops at *"No bootable option or device was found"*, and chaining an
+> arm64 iPXE from a small disk did not work either (tested 29/09/2026). `nodes-pxe.sh` refuses to
+> create the nodes on an ARM host for that reason. Until a tested path is published here, groups
+> with Apple Silicon run Module 04 on a teammate's x86 laptop or a lab machine, and keep `mgmt`
+> and `store` on their own. **Tell the teaching staff in week 1** if nobody in your group has an
+> x86 machine.
 
 ### There is no BMC on a laptop
 
@@ -137,6 +166,10 @@ adjusted rather than discovered at the defence.
 | `vagrant up` hangs at *"Waiting for machine to boot"* | Virtualisation disabled in firmware, or Hyper-V is holding the CPU on Windows. |
 | Nodes get an address you did not configure | The hypervisor's DHCP is still on for the cluster network. Check `libvirt__dhcp_enabled: false` / `virtualbox__intnet`. |
 | PXE boot never finds a server | Wrong network on the node's NIC, or `dhcpd` on `mgmt` is bound to `eth0` rather than `eth1`. |
+| `VBOX_E_PLATFORM_ARCH_NOT_SUPPORTED` (Apple Silicon) | An x86 VM, or a box whose OVF describes one (`rockylinux/9` arm64). Use the default `bento/rockylinux-9`. |
+| VM enters *Guru Meditation* right after "Booting VM" (Apple Silicon) | Nested virtualisation is on. The Vagrantfile turns it off on ARM hosts; check you have not re-added it. |
+| `VERR_PDM_USB_NAME_CLASH` for every VM | The VirtualBox Extension Pack is a different version from VirtualBox. Install the matching pack, or remove it. |
+| `ip addr show eth1`: *Device does not exist* | Interface names depend on the provider — see §3. |
 | Everything is extremely slow | RAM is oversubscribed and the host is swapping. Close things, or use the reduced profile. |
 | `vagrant ssh` stops working after Module 02 | Your SSH hardening removed the `vagrant` user or its key. Recover through the hypervisor console. |
 | Node boots but has no `/apps` | `store` is not up, or its export is not configured yet. |

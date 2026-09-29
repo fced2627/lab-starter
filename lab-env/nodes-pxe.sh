@@ -18,7 +18,9 @@ MEM=${FCED_NODE_MEM:-2048}
 CPUS=${FCED_NODE_CPUS:-2}
 NODES=(node01 node02)
 # Fixed MACs: Warewulf identifies a node by its MAC, so these must be stable.
-declare -A MAC=([node01]="52:54:00:fc:ed:01" [node02]="52:54:00:fc:ed:02")
+# (A function, not an associative array: macOS ships bash 3.2.)
+mac() { case "$1" in node01) echo "52:54:00:fc:ed:01" ;; node02) echo "52:54:00:fc:ed:02" ;; esac; }
+HOST_ARCH=$(uname -m)
 
 detect_provider() {
   if command -v virsh >/dev/null && virsh -c qemu:///system version >/dev/null 2>&1; then
@@ -35,19 +37,25 @@ PROVIDER=$(detect_provider)
 lv_create() {
   for n in "${NODES[@]}"; do
     virt-install --name "$n" --memory "$MEM" --vcpus "$CPUS" \
-      --network network="$NET",mac="${MAC[$n]}",model=virtio \
+      --network network="$NET",mac="$(mac "$n")",model=virtio \
       --disk size=10,format=qcow2 \
       --boot network,hd --pxe --os-variant rocky9 \
       --graphics none --console pty,target_type=serial --noautoconsole --noreboot
-    echo "$n defined, MAC ${MAC[$n]}"
+    echo "$n defined, MAC $(mac "$n")"
   done
 }
 vb_create() {
+  # VirtualBox's ARM (Apple Silicon) firmware has no network boot: a PXE-only VM
+  # stops at "No bootable option or device was found". See README §4.
+  if [[ $HOST_ARCH == arm64 || $HOST_ARCH == aarch64 ]]; then
+    echo "VirtualBox on an ARM host cannot PXE-boot a VM; see lab-env/README.md §4" >&2
+    exit 1
+  fi
   for n in "${NODES[@]}"; do
     VBoxManage createvm --name "$n" --ostype RedHat_64 --register
     VBoxManage modifyvm "$n" --memory "$MEM" --cpus "$CPUS" \
       --nic1 intnet --intnet1 "$NET" --nictype1 82540EM \
-      --macaddress1 "${MAC[$n]//:/}" \
+      --macaddress1 "$(mac "$n" | tr -d :)" \
       --boot1 net --boot2 disk --boot3 none --boot4 none \
       --uart1 0x3F8 4 --uartmode1 server "/tmp/$n.sock"
     VBoxManage createmedium disk --filename "$HOME/VirtualBox VMs/$n/$n.vdi" \
@@ -55,7 +63,7 @@ vb_create() {
     VBoxManage storagectl "$n" --name SATA --add sata
     VBoxManage storageattach "$n" --storagectl SATA --port 0 --type hdd \
       --medium "$HOME/VirtualBox VMs/$n/$n.vdi"
-    echo "$n defined, MAC ${MAC[$n]}"
+    echo "$n defined, MAC $(mac "$n")"
   done
 }
 

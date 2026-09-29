@@ -5,10 +5,14 @@
 #   vagrant ssh mgmt           get a shell on the management node
 #   vagrant halt / destroy     stop / delete
 #
-# Two networks per machine:
-#   eth0  NAT, created by Vagrant. Host-to-VM SSH and outbound internet only.
-#   eth1  the cluster network 10.10.7.0/24, with the hypervisor's DHCP DISABLED
-#         so that Warewulf's dhcpd can own it from Module 04 onwards.
+# Two networks per machine (interface names depend on the provider: enp0s8/enp0s9
+# on VirtualBox, eth0/eth1 or ens*/enp* elsewhere — find the cluster one by address):
+#   1st  NAT, created by Vagrant. Host-to-VM SSH and outbound internet only.
+#   2nd  the cluster network 10.10.G.0/24, with the hypervisor's DHCP DISABLED
+#        so that Warewulf's dhcpd can own it from Module 04 onwards.
+#
+# Host architecture matters (see README §2): on an ARM host (Apple Silicon) the
+# guests are aarch64, nested virtualisation is off, and the default box changes.
 #
 # From Module 04, node01 and node02 stop being Vagrant boxes: you destroy them
 # here and recreate them as diskless PXE machines with lab-env/nodes-pxe.sh.
@@ -16,7 +20,10 @@
 
 GROUP   = ENV.fetch("FCED_GROUP", "07").rjust(2, "0")
 SUBNET  = "10.10.#{GROUP.to_i}"
-BOX     = ENV.fetch("FCED_BOX", "rockylinux/9")
+# ARM hosts: the official rockylinux/9 arm64 box describes an x86 machine in its
+# OVF and VirtualBox refuses to start it; Bento's arm64 box is correct.
+HOST_ARM = RbConfig::CONFIG["host_cpu"] =~ /arm|aarch64/ ? true : false
+BOX     = ENV.fetch("FCED_BOX", HOST_ARM ? "bento/rockylinux-9" : "rockylinux/9")
 PROFILE = ENV.fetch("FCED_PROFILE", "full")      # full = 4 VMs, small = 3 VMs
 
 # memory (MB) / vCPU.  full: 8 GB and 7 vCPU in total — sized for a 16 GB laptop.
@@ -68,11 +75,14 @@ Vagrant.configure("2") do |config|
       m.vm.provider :virtualbox do |v|
         v.memory = spec[:mem]
         v.cpus   = spec[:cpus]
-        v.customize ["modifyvm", :id, "--nested-hw-virt", "on"]
+        # On Apple Silicon this enables EL2 and the vCPU dies with a Guru
+        # Meditation before the firmware runs: x86 hosts only.
+        v.customize ["modifyvm", :id, "--nested-hw-virt", "on"] unless HOST_ARM
         v.customize ["modifyvm", :id, "--paravirtprovider", "kvm"]
       end
 
-      # Apple Silicon: vagrant-qemu, with an aarch64 box (set FCED_BOX)
+      # Alternative on Apple Silicon (not the tested path): vagrant-qemu with an
+      # aarch64 box. It supports neither private_network nor vm.disk as written here.
       m.vm.provider :qemu do |v|
         v.memory = "#{spec[:mem]}M"
         v.smp    = spec[:cpus]
